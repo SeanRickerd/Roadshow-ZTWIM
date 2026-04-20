@@ -1,0 +1,281 @@
+= Lab: Zero-Trust Database Access – SPIFFE mTLS for PostgreSQL
+:labid: LAB-201-01
+:cis-summary: "Eliminate password-based database authentication by enforcing cryptographic workload identity with automated certificate lifecycle."
+:mitre-summary: "Prevents credential access, lateral movement, and man-in-the-middle attacks by requiring mutual TLS authentication with SPIFFE-issued short-lived certificates."
+:audit-evidence: "PostgreSQL connection succeeds only with valid SPIFFE certificates; password authentication denied; certificate CN matches database username."
+:cis-mitre-codes: '{"cisMapping":{"primary":["5.3.1","5.4.1"],"related":["5.2.1","5.7.1"]},"mitre":{"techniques":["T1078","T1563","T1110","T1557"],"tactics":["TA0006","TA0008","TA0009"],"mitigations":["M1027","M1041","M1054"]}}'
+:toc:
+:sectnums:
+:icons: font
+
+== Skill
+Learn how to secure database connections using cryptographic workload identity instead of static passwords. You'll deploy PostgreSQL with SPIFFE-issued certificates, establish mutual TLS (mTLS) authentication, and verify that only workloads with valid certificates can connect.
+
+== Objective
+
+* Deploy PostgreSQL server with SPIFFE certificate integration
+* Deploy client application with separate SPIFFE identity
+* Establish mTLS connection using SPIFFE-issued certificates
+* Verify certificate-based authentication (no passwords)
+* Inspect certificate properties and identity binding
+
+== Why it Matters
+Password-based database authentication creates persistent credential theft targets. Compromised passwords enable lateral movement, and stolen credentials remain valid until manually rotated. Network segmentation alone cannot prevent authenticated attackers from accessing databases. Zero-trust principles require cryptographic proof of workload identity, not just network proximity or static secrets.
+
+== What it Solves
+
+* Credential theft and password spraying attacks
+* Lateral movement after initial compromise
+* Man-in-the-middle attacks on database connections
+* Manual certificate rotation burden
+* Identity spoofing via stolen credentials
+* Privileged access sprawl from shared database passwords
+
+== Understanding the Attack Surface
+[cols="1,2,2",options="header"]
+|===
+|Area | Risk If Ignored | Analogy
+|Static Database Passwords | Credential theft enables persistence | Master key copies floating everywhere
+|Password-Based Auth | Brute force / spray attacks | Guessable combination lock
+|Network-Only Security | Lateral movement after breach | Locked front door, open internal doors
+|Manual Cert Rotation | Stale credentials remain valid | Expired building access badges still work
+|Unverified Client Identity | Impersonation via stolen creds | Anyone with password enters as "admin"
+|No Mutual Authentication | Server cannot verify client | One-way ID check at secure facility
+|Long-Lived Credentials | Extended exposure window | Annual password unchanged
+|===
+
+== How to Try It
+
+=== Verify ZTWIM installation
+[source,sh]
+----
+oc get crd | grep clusteridentity
+oc get crd | grep clusterspiffeid
+----
+
+What to look for:
+
+- ClusterIdentity CRD should exist (ZTWIM core resource)
+- ClusterSPIFFEID CRD should exist (workload identity configuration)
+
+If either is missing, install Zero Trust Workload Identity Manager (ZTWIM) before proceeding.
+
+=== Deploy PostgreSQL server with SPIFFE integration
+[source,sh]
+----
+oc apply -f https://raw.githubusercontent.com/SeanRickerd/postgresql-spiffe-demo/refs/heads/main/deploy/postgresql-spiffe.yaml
+----
+
+This creates:
+
+- Namespace: `postgresql-spiffe`
+- Deployment: PostgreSQL server with spiffe-helper sidecar
+- Service: Exposed on port 5432
+- ClusterSPIFFEID: Configures server certificate with CN=`postgresql-spiffe.postgresql-spiffe.svc`
+
+=== Deploy PostgreSQL client with SPIFFE integration
+[source,sh]
+----
+oc apply -f https://raw.githubusercontent.com/SeanRickerd/postgresql-spiffe-demo/refs/heads/main/deploy/postgresql-spiffe-client.yaml
+----
+
+This creates:
+
+- Namespace: `postgresql-spiffe-client`
+- Deployment: Client pod with spiffe-helper sidecar and psql tools
+- ClusterSPIFFEID: Configures client certificate with CN=`postgresql_spiffe` (database username)
+
+=== Wait for pods to be ready
+[source,sh]
+----
+oc wait --for=condition=Ready pod -l app=postgresql-spiffe -n postgresql-spiffe --timeout=120s
+oc wait --for=condition=Ready pod -l app=postgresql-spiffe-client -n postgresql-spiffe-client --timeout=120s
+----
+
+=== Inspect server certificate properties
+[source,sh]
+----
+oc rsh -n postgresql-spiffe -c postgresql-spiffe deployment/postgresql-spiffe \
+  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -text
+----
+
+What to look for:
+
+- Subject: CN should match server hostname: `postgresql-spiffe.postgresql-spiffe.svc`
+- Issuer: Should reference SPIRE authority
+- Validity: Short lifespan (typically minutes to hours, not days/months)
+- Subject Alternative Name (SAN): Should include SPIFFE ID URI
+
+Example:
+[source,text]
+----
+Subject: CN=postgresql-spiffe.postgresql-spiffe.svc
+Issuer: O=SPIRE, C=US
+Validity:
+    Not Before: Apr 20 14:23:45 2026 GMT
+    Not After : Apr 20 15:23:55 2026 GMT  ← 1-hour validity
+X509v3 Subject Alternative Name:
+    URI:spiffe://cluster.local/ns/postgresql-spiffe/sa/postgresql-spiffe
+----
+
+=== Inspect client certificate properties
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -text
+----
+
+What to look for:
+
+- Subject: CN should match PostgreSQL username: `postgresql_spiffe`
+- Validity: Short-lived (same rotation policy as server)
+- SPIFFE ID: Unique identity for client workload
+
+This CN value (`postgresql_spiffe`) must match a valid PostgreSQL user. The server validates the client certificate and maps the CN to the database username.
+
+=== Establish mTLS connection from client
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client
+----
+
+Inside the pod:
+[source,sh]
+----
+psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=verify-full sslcert=/opt/postgresql-certs/svid.pem sslkey=/opt/postgresql-certs/svid.key sslrootcert=/opt/postgresql-certs/svid_bundle.pem"
+----
+
+What to look for:
+
+- Connection succeeds without password prompt
+- `sslmode=verify-full` enforces both server certificate verification and hostname validation
+- Three certificate components required:
+  * `sslcert`: Client's public certificate
+  * `sslkey`: Client's private key
+  * `sslrootcert`: CA bundle to verify server certificate
+
+=== Verify certificate-based authentication
+Inside the psql session:
+[source,sql]
+----
+\conninfo
+SELECT version();
+\q
+----
+
+Example output:
+[source,text]
+----
+You are connected to database "testdb" as user "postgresql_spiffe" on host "postgresql-spiffe.postgresql-spiffe.svc" at port "5432".
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)
+----
+
+Critical evidence:
+
+- User matches certificate CN: `postgresql_spiffe`
+- SSL connection active with TLS 1.3
+- No password was transmitted
+
+=== Attempt connection without valid certificate (expect failure)
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client
+----
+
+Inside the pod:
+[source,sh]
+----
+psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=require" || true
+----
+
+This should fail because:
+
+- No client certificate provided
+- PostgreSQL is configured to require certificate authentication
+- Password authentication is disabled for this user
+
+Expected error:
+[source,text]
+----
+psql: error: connection to server at "postgresql-spiffe.postgresql-spiffe.svc", port 5432 failed: FATAL:  no pg_hba.conf entry for host "10.x.x.x", user "postgresql_spiffe", database "testdb", no encryption
+----
+
+=== Verify automatic certificate rotation (optional)
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -enddate
+----
+
+Note the expiration time, then check again after the certificate rotation window:
+[source,sh]
+----
+sleep 3600  # Wait 1 hour (adjust based on your rotation policy)
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -enddate
+----
+
+The certificate should have a new expiration time, proving automatic rotation occurred without application downtime.
+
+=== Cleanup (optional)
+[source,sh]
+----
+oc delete project postgresql-spiffe postgresql-spiffe-client --wait=false
+----
+
+== Summary Table
+[cols="1,2,2,2",options="header"]
+|===
+|Aspect | Password Auth (Traditional) | Certificate Auth (SPIFFE) | Mutual TLS (This Lab)
+|Credential Type | Static password | Client certificate only | Client + server certificates
+|Rotation Burden | Manual | Automatic | Automatic (both sides)
+|Theft Impact | Persistent access | Time-limited exposure | Time-limited + verified server
+|Authentication Proof | Shared secret | Public-key cryptography | Bidirectional crypto proof
+|Man-in-the-Middle Risk | High (no server verification) | Medium (client verifies server) | Low (both verify each other)
+|Identity Binding | None (password reuse) | Certificate CN | Certificate CN + SPIFFE ID
+|Lateral Movement | Unlimited with stolen creds | Limited to cert validity | Blocked without both certs
+|===
+
+== FAQs
+Why not just use strong passwords?:: Passwords are static targets; certificates rotate automatically and cannot be brute-forced.
+What if the SPIRE server is compromised?:: Certificate rotation limits exposure window; compromised SPIRE requires cluster-level breach, not just application compromise.
+Can I still use password auth for admin access?:: Yes, configure `pg_hba.conf` with different rules for different users; certificate auth for applications, password for break-glass admin.
+How often do certificates rotate?:: Default is typically 1 hour; configurable via ClusterSPIFFEID TTL settings.
+What happens during certificate rotation?:: spiffe-helper automatically fetches new certificates before expiration and signals PostgreSQL to reload; no connection interruption.
+Why is CN set to the database username?:: PostgreSQL's certificate authentication maps certificate CN to database user; this enforces identity binding at the TLS layer.
+
+[[control-mapping-detail]]
+== Appendix: Control Mapping Detail (CIS ↔ MITRE)
+
+Primary CIS Controls: 5.3.1 (workload identity), 5.4.1 (encryption in transit)
+
+[cols="1,3",options="header"]
+|===
+|Aspect | Explanation
+|Primary CIS Control (5.3.1) | Demonstrated by SPIFFE-based workload identity replacing password authentication; ClusterSPIFFEID resources define cryptographic identity.
+|Primary CIS Control (5.4.1) | Demonstrated by enforced mTLS with `sslmode=verify-full`; both client and server certificates validated.
+|ATT&CK Technique (T1078) | Valid Accounts – mitigated by eliminating static credentials; compromised pod cannot reuse credentials after cert expiration.
+|ATT&CK Technique (T1563) | Remote Service Session Hijacking – mitigated by certificate-based session authentication.
+|ATT&CK Technique (T1110) | Brute Force – eliminated; no password to brute-force.
+|ATT&CK Technique (T1557) | Man-in-the-Middle – mitigated by mutual certificate verification.
+|Mitigation (M1027) | Password Policies – replaced entirely by cryptographic identity.
+|Mitigation (M1041) | Encrypt Sensitive Information – enforced via TLS 1.3 with strong ciphers.
+|Mitigation (M1054) | Software Configuration – demonstrated via PostgreSQL `pg_hba.conf` and ClusterSPIFFEID manifests.
+|Observed Evidence | Successful mTLS connection with certificate validation; failed connection without certificates; certificate CN matches database username; automatic rotation visible via expiration timestamp changes.
+|Learner Outcome | Replace password-based database authentication with automated, short-lived cryptographic workload identity.
+|Audit Use | ClusterSPIFFEID manifests + PostgreSQL logs showing certificate authentication + psql `\conninfo` output + failed password attempt.
+|===
+Where does Lab 201-01 fit?:: 201-01 covers zero-trust workload identity; combine with network policies (Lab 101-XX) and pod security standards (Lab 101-XX) for defense-in-depth.
+
+== Closing Story
+Certificate-based authentication is like airport security with biometric ID: you cannot borrow someone else's fingerprint, and the ID expires if you leave and return. Passwords are like shared gate codes: anyone with the code enters, and the code persists until manually changed.
+
+== Next Step Ideas
+
+* Extend to multi-replica PostgreSQL deployments
+* Add PersistentVolumeClaim for database persistence
+* Integrate with OpenShift service mesh for additional mTLS layers
+* Implement NetworkPolicies restricting database access to certificate-authenticated namespaces only
+* Add PostgreSQL audit logging to track certificate-based authentication events
+* Configure alert on certificate validation failures (potential attack indicator)
+* Create GitOps workflow for ClusterSPIFFEID lifecycle management
