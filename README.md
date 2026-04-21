@@ -18,16 +18,44 @@ This roadshow module demonstrates how to eliminate password-based database authe
 
 ### Required Infrastructure
 - OpenShift 4.12+ cluster with cluster-admin access
-- Zero Trust Workload Identity Manager (ZTWIM) installed with CRDs
+- Zero Trust Workload Identity Manager (ZTWIM) / SPIRE installed with CRDs
 - `oc` CLI tool configured and authenticated
 
-### Verify ZTWIM Installation
+### Installing ZTWIM/SPIRE
+
+**Option 1: Automated Installation (Recommended)**
 ```bash
-oc get crd | grep clusteridentity
-oc get crd | grep clusterspiffeid
+# Validate current prerequisites
+./scripts/00-validate-prerequisites.sh
+
+# Install SPIRE if not present
+./scripts/01-install-spire.sh
 ```
 
-Both CRDs should exist before proceeding.
+**Option 2: Manual Installation**
+
+See detailed installation guide: **[docs/00-prerequisites.adoc](docs/00-prerequisites.adoc)**
+
+This covers:
+- Multiple installation methods (OperatorHub, direct SPIRE, Helm)
+- Trust domain configuration
+- Network policies
+- Troubleshooting
+
+### Verify ZTWIM/SPIRE Installation
+```bash
+# Check for required CRDs
+oc get crd clusterspiffeids.spire.spiffe.io
+
+# Verify SPIRE components are running
+oc get pods -n spire -l app=spire-server
+oc get pods -n spire -l app=spire-agent
+
+# Or use the validation script
+./scripts/00-validate-prerequisites.sh
+```
+
+All checks should pass before proceeding with the lab.
 
 ## Repository Structure
 
@@ -35,7 +63,11 @@ Both CRDs should exist before proceeding.
 .
 ├── README.md                                    # This file
 ├── docs/
+│   ├── 00-prerequisites.adoc                    # ZTWIM/SPIRE installation guide
 │   └── lab-201-01-postgresql-spiffe-mtls.adoc  # Complete lab guide (AsciiDoc format)
+├── scripts/
+│   ├── 00-validate-prerequisites.sh             # Validate ZTWIM/SPIRE installation
+│   └── 01-install-spire.sh                      # Automated SPIRE installation
 └── deploy/
     ├── postgresql-spiffe.yaml                   # PostgreSQL server with SPIFFE integration
     └── postgresql-spiffe-client.yaml            # PostgreSQL client with SPIFFE integration

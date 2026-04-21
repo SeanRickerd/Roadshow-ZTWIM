@@ -1,0 +1,312 @@
+= Prerequisites: Installing ZTWIM on OpenShift
+:toc:
+:sectnums:
+:icons: font
+
+== Overview
+
+This document covers the prerequisites and installation steps for Zero Trust Workload Identity Manager (ZTWIM) required to complete the PostgreSQL mTLS lab.
+
+== Required Cluster Permissions
+
+You must have **cluster-admin** privileges to install ZTWIM, as it requires:
+
+* Creating CustomResourceDefinitions (CRDs)
+* Installing operators or controllers with cluster-wide scope
+* Creating ClusterRoles and ClusterRoleBindings
+* Deploying webhook configurations
+
+== Minimum Cluster Requirements
+
+[cols="1,2",options="header"]
+|===
+|Requirement | Specification
+|OpenShift Version | 4.12 or later
+|Kubernetes Version | 1.25 or later
+|CPU | Minimum 2 cores available for SPIRE components
+|Memory | Minimum 4Gi available for SPIRE components
+|Storage | PersistentVolume support (for SPIRE server data persistence)
+|Network | Cluster networking with service mesh support (optional but recommended)
+|===
+
+== Required CLI Tools
+
+Ensure the following tools are installed and configured:
+
+[source,sh]
+----
+# OpenShift CLI
+oc version
+
+# kubectl (usually included with oc)
+kubectl version --client
+
+# jq for JSON parsing
+jq --version
+
+# Optional: Helm for operator installation
+helm version
+----
+
+== ZTWIM Installation Methods
+
+ZTWIM can be installed via multiple methods depending on your organization's requirements:
+
+=== Method 1: Red Hat Catalog / OperatorHub (Recommended)
+
+If ZTWIM is available in your Red Hat catalog:
+
+[source,sh]
+----
+# Search for ZTWIM operator
+oc get packagemanifests -n openshift-marketplace | grep -i ztwim
+
+# Or search for SPIFFE/SPIRE operators
+oc get packagemanifests -n openshift-marketplace | grep -i spiffe
+----
+
+Install via OpenShift Console:
+
+1. Navigate to **Operators** → **OperatorHub**
+2. Search for "Zero Trust Workload Identity Manager" or "SPIFFE"
+3. Click **Install**
+4. Select installation mode: **All namespaces on the cluster**
+5. Approve any required permissions
+6. Wait for operator to reach **Succeeded** state
+
+Verify installation:
+[source,sh]
+----
+oc get csv -n openshift-operators | grep -i ztwim
+oc get pods -n openshift-operators | grep -i ztwim
+----
+
+=== Method 2: Direct SPIRE Installation
+
+If ZTWIM is not available as an operator, you can deploy SPIRE directly:
+
+[source,sh]
+----
+# Create namespace for SPIRE
+oc create namespace spire
+
+# Apply SPIRE CRDs
+oc apply -f https://raw.githubusercontent.com/spiffe/spire/main/support/k8s/k8s-workload-registrar/mode-crd/config/spire-server.yaml
+
+# Deploy SPIRE server
+oc apply -f https://raw.githubusercontent.com/spiffe/spire/main/support/k8s/server-statefulset.yaml -n spire
+
+# Deploy SPIRE agent (DaemonSet)
+oc apply -f https://raw.githubusercontent.com/spiffe/spire/main/support/k8s/agent-daemonset.yaml -n spire
+----
+
+NOTE: URLs above are examples. Use official SPIRE documentation for current installation manifests.
+
+=== Method 3: Custom Helm Chart
+
+If your organization provides a custom Helm chart:
+
+[source,sh]
+----
+# Add Helm repository
+helm repo add <your-org-repo> <repo-url>
+helm repo update
+
+# Install ZTWIM
+helm install ztwim <your-org-repo>/ztwim \
+  --namespace ztwim-system \
+  --create-namespace \
+  --set global.clusterDomain=cluster.local
+----
+
+== Required CRDs Verification
+
+After installation, verify that the required CRDs exist:
+
+[source,sh]
+----
+# Check for ClusterIdentity CRD
+oc get crd clusteridentities.authentication.k8s.io 2>/dev/null || \
+  echo "❌ ClusterIdentity CRD not found"
+
+# Check for ClusterSPIFFEID CRD
+oc get crd clusterspiffeids.spire.spiffe.io 2>/dev/null || \
+  echo "❌ ClusterSPIFFEID CRD not found"
+
+# Alternative: Check for any SPIFFE-related CRDs
+oc get crd | grep -i spiffe
+----
+
+Expected output should show:
+[source,text]
+----
+clusterspiffeids.spire.spiffe.io
+----
+
+== SPIRE Server Configuration
+
+Verify SPIRE server is running and configured:
+
+[source,sh]
+----
+# Check SPIRE server pod status
+oc get pods -n spire -l app=spire-server
+
+# Check SPIRE agent DaemonSet
+oc get daemonset -n spire spire-agent
+
+# Verify SPIRE server endpoint
+oc get svc -n spire spire-server
+----
+
+== Trust Domain Configuration
+
+SPIRE requires a trust domain configuration. Verify or configure:
+
+[source,sh]
+----
+# Check existing SPIRE server configuration
+oc get configmap -n spire spire-server -o yaml | grep trust_domain
+
+# Expected output similar to:
+# trust_domain = "cluster.local"
+----
+
+If not configured, update the trust domain to match your cluster:
+
+[source,sh]
+----
+oc edit configmap spire-server -n spire
+----
+
+Add or modify:
+[source,yaml]
+----
+server {
+  trust_domain = "cluster.local"
+  # ... other configuration
+}
+----
+
+== SPIFFE Helper Configuration
+
+The PostgreSQL demo uses `spiffe-helper` to manage certificate lifecycle. Verify it's available:
+
+[source,sh]
+----
+# Check if spiffe-helper image is accessible
+oc run test-spiffe-helper \
+  --image=ghcr.io/spiffe/spiffe-helper:0.6.0 \
+  --restart=Never \
+  --rm \
+  -it \
+  -- /spiffe-helper --version
+----
+
+If the image is not accessible from your cluster, you may need to:
+
+1. Mirror the image to your internal registry
+2. Update image references in deployment manifests
+3. Configure image pull secrets
+
+== Network Configuration (Optional)
+
+For enhanced security, configure NetworkPolicies:
+
+[source,sh]
+----
+# Allow SPIRE agent to communicate with SPIRE server
+oc apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-spire-agent-to-server
+  namespace: spire
+spec:
+  podSelector:
+    matchLabels:
+      app: spire-server
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: spire-agent
+    ports:
+    - protocol: TCP
+      port: 8081
+EOF
+----
+
+== Validation Script
+
+Run the validation script to verify all prerequisites:
+
+[source,sh]
+----
+./scripts/00-validate-prerequisites.sh
+----
+
+This script checks:
+
+* Cluster connectivity
+* Required CRDs existence
+* SPIRE server/agent status
+* Trust domain configuration
+* spiffe-helper image accessibility
+
+== Troubleshooting
+
+=== CRDs Not Found
+
+If `clusterspiffeids.spire.spiffe.io` CRD is missing:
+
+1. Verify SPIRE installation completed successfully
+2. Check operator logs: `oc logs -n openshift-operators -l name=spire-operator`
+3. Manually apply CRDs from SPIRE repository
+4. Contact your cluster administrator
+
+=== SPIRE Server Not Running
+
+[source,sh]
+----
+# Check pod status
+oc describe pod -n spire -l app=spire-server
+
+# Check logs
+oc logs -n spire -l app=spire-server --tail=50
+
+# Common issues:
+# - PersistentVolume not bound
+# - Insufficient RBAC permissions
+# - Trust domain misconfiguration
+----
+
+=== spiffe-helper Image Pull Failures
+
+[source,sh]
+----
+# Check image pull status
+oc describe pod <failing-pod> | grep -A 10 "Events:"
+
+# Solutions:
+# 1. Mirror image to internal registry
+# 2. Configure image pull secret
+# 3. Use alternative spiffe-helper image
+----
+
+== Next Steps
+
+Once all prerequisites are validated:
+
+1. Proceed to the main lab: link:lab-201-01-postgresql-spiffe-mtls.adoc[PostgreSQL SPIFFE mTLS Lab]
+2. Deploy PostgreSQL server with SPIFFE integration
+3. Establish mTLS database connections
+
+== Additional Resources
+
+* https://spiffe.io/docs/latest/spire/[SPIRE Documentation]
+* https://github.com/spiffe/spire[SPIRE GitHub Repository]
+* https://docs.openshift.com/container-platform/latest/operators/understanding/olm/olm-understanding-olm.html[OpenShift Operator Lifecycle Manager]
+* https://spiffe.io/docs/latest/spire-integrations/oidc-federation-aks/[SPIRE on Kubernetes]
