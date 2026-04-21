@@ -1,0 +1,19 @@
+# Test scripts (keep local)
+test-roadshow.sh
+
+# Test artifacts
+*.log
+/tmp/
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
