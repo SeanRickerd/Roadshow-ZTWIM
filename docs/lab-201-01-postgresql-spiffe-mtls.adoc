@@ -46,182 +46,1054 @@ Password-based database authentication creates persistent credential theft targe
 
 == How to Try It
 
-=== Verify ZTWIM installation
+=== Prerequisites: Install Zero Trust Workload Identity Manager
+
+Before deploying PostgreSQL with SPIFFE certificates, you must install the Zero Trust Workload Identity Manager (ZTWIM) operator and configure SPIRE components.
+
+==== Option A: Automated Installation (Recommended)
+
+Use the provided installation script to automatically detect your cluster configuration and deploy all components:
+
 [source,sh]
 ----
-oc get crd | grep clusteridentity
-oc get crd | grep clusterspiffeid
+cd Roadshow-ZTWIM
+./scripts/00-install-ztwim-operator.sh
 ----
 
-What to look for:
+This script will:
 
-- ClusterIdentity CRD should exist (ZTWIM core resource)
-- ClusterSPIFFEID CRD should exist (workload identity configuration)
+- Auto-detect your cluster domain
+- Install the ZTWIM operator from OperatorHub
+- Create SPIRE server, agents, and CSI driver
+- Configure trust domain based on cluster domain
+- Verify all components are running
 
-If either is missing, install Zero Trust Workload Identity Manager (ZTWIM) before proceeding.
+Skip to <<verify-ztwim>> after the script completes.
 
-=== Deploy PostgreSQL server with SPIFFE integration
+==== Option B: Manual Installation via OpenShift Console
+
+If you prefer to understand each step or cannot run automation scripts, follow these manual steps.
+
+[NOTE]
+====
+Screenshots for the Console UI steps will be added in a future update. For now, follow the text instructions which reference specific UI elements and navigation paths.
+====
+
+===== Step 1: Install ZTWIM Operator
+
+1. Navigate to *OperatorHub* in the OpenShift Console
+   - Click *Operators* → *OperatorHub* in the left navigation
+2. Search for "Zero Trust Workload Identity Manager"
+3. Click on the *Zero Trust Workload Identity Manager* tile
+4. Click *Install*
+5. On the installation page:
+   - *Update Channel*: Select `stable-v1`
+   - *Installation Mode*: Select `A specific namespace on the cluster`
+   - *Installed Namespace*: Select `openshift-zero-trust-workload-identity-manager` (create if needed)
+   - *Update Approval*: Select `Automatic`
+6. Click *Install*
+7. Wait for the operator status to show "Succeeded" (typically 2-3 minutes)
+
+[NOTE]
+====
+The operator will create a namespace called `openshift-zero-trust-workload-identity-manager` if it doesn't exist. All SPIRE components will run in this namespace.
+====
+
+===== Step 2: Get Your Cluster Domain
+
+Before creating SPIRE components, you need your cluster's apps domain for the trust domain configuration.
+
+Run this command in the terminal:
+[source,sh]
+----
+oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
+----
+
+Example output: `apps.cluster-abc12.example.openshiftapps.com`
+
+Save this value - you'll need it in the next steps.
+
+===== Step 3: Create ZeroTrustWorkloadIdentityManager Resource
+
+1. Navigate to *Operators* → *Installed Operators*
+2. Ensure you're in the `openshift-zero-trust-workload-identity-manager` project (top dropdown)
+3. Click on *Zero Trust Workload Identity Manager* operator
+4. Click the *Zero Trust Workload Identity Manager* tab
+5. Click *Create ZeroTrustWorkloadIdentityManager*
+6. Switch to *YAML view*
+7. Replace the content with:
+
+[source,yaml]
+----
+apiVersion: operator.openshift.io/v1alpha1
+kind: ZeroTrustWorkloadIdentityManager
+metadata:
+  name: cluster
+spec:
+  trustDomain: <YOUR-CLUSTER-DOMAIN>  # Replace with output from Step 2
+  clusterName: cluster
+  bundleConfigMap: spire-bundle
+----
+
+8. Click *Create*
+
+[IMPORTANT]
+====
+Replace `<YOUR-CLUSTER-DOMAIN>` with the actual domain from Step 2. For example: `apps.cluster-abc12.example.openshiftapps.com`
+====
+
+===== Step 4: Create SpireServer Resource
+
+1. Stay on the *Zero Trust Workload Identity Manager* operator page
+2. Click the *Spire Server* tab
+3. Click *Create SpireServer*
+4. Switch to *YAML view*
+5. Replace the content with:
+
+[source,yaml]
+----
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireServer
+metadata:
+  name: cluster
+spec:
+  caSubject:
+    commonName: redhat.com
+    country: US
+    organization: Red Hat
+  persistence:
+    size: 5Gi
+    accessMode: ReadWriteOnce
+  datastore:
+    databaseType: sqlite3
+    connectionString: /run/spire/data/datastore.sqlite3
+  jwtIssuer: https://spire-spiffe-oidc-discovery-provider.<YOUR-CLUSTER-DOMAIN>  # Replace with your domain
+----
+
+6. Replace `<YOUR-CLUSTER-DOMAIN>` with your cluster domain
+7. Click *Create*
+8. Wait for the SPIRE server pod to reach "Running" status (check Workloads → Pods)
+
+===== Step 5: Create SpireAgent Resource
+
+1. Click the *Spire Agent* tab
+2. Click *Create SpireAgent*
+3. Switch to *YAML view*
+4. Replace the content with:
+
+[source,yaml]
+----
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireAgent
+metadata:
+  name: cluster
+spec:
+  nodeAttestor:
+    k8sPSATEnabled: "true"
+  workloadAttestors:
+    k8sEnabled: "true"
+    workloadAttestorsVerification:
+      type: auto
+----
+
+5. Click *Create*
+6. Wait for SPIRE agent pods to run on all nodes (one pod per node)
+
+===== Step 6: Create SpiffeCSIDriver Resource
+
+1. Click the *Spiffe CSI Driver* tab
+2. Click *Create SpiffeCSIDriver*
+3. Switch to *YAML view*
+4. Replace the content with:
+
+[source,yaml]
+----
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpiffeCSIDriver
+metadata:
+  name: cluster
+spec:
+  agentSocketPath: /run/spire/agent-sockets
+----
+
+5. Click *Create*
+6. Wait for CSI driver pods to reach "Running" status on all nodes
+
+===== Step 7: Create SpireOIDCDiscoveryProvider Resource
+
+1. Click the *Spire OIDC Discovery Provider* tab
+2. Click *Create SpireOIDCDiscoveryProvider*
+3. Switch to *YAML view*
+4. Replace the content with:
+
+[source,yaml]
+----
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireOIDCDiscoveryProvider
+metadata:
+  name: cluster
+spec:
+  jwtIssuer: https://spire-spiffe-oidc-discovery-provider.<YOUR-CLUSTER-DOMAIN>  # Replace with your domain
+  managedRoute: "true"
+----
+
+5. Replace `<YOUR-CLUSTER-DOMAIN>` with your cluster domain
+6. Click *Create*
+
+[[verify-ztwim]]
+=== Verify ZTWIM Installation
+
+Whether you used automated or manual installation, verify all components are running:
+
+[source,sh]
+----
+# Check operator is running
+oc get pods -n openshift-zero-trust-workload-identity-manager
+
+# Check SPIRE server (should show 2/2 Running)
+oc get pods -n openshift-zero-trust-workload-identity-manager -l app.kubernetes.io/name=spire-server
+
+# Check SPIRE agents (should show 1 pod per node, all Running)
+oc get pods -n openshift-zero-trust-workload-identity-manager -l app.kubernetes.io/name=spire-agent
+
+# Check CSI driver (should show 1 pod per node, all Running)
+oc get pods -n openshift-zero-trust-workload-identity-manager -l app.kubernetes.io/name=spire-spiffe-csi-driver
+
+# Verify CSI driver is registered
+oc get csidriver csi.spiffe.io
+
+# Check ClusterSPIFFEID CRD exists
+oc get crd clusterspiffeids.spire.spiffe.io
+----
+
+Expected output:
+
+- SPIRE server: 1 pod with 2/2 containers running
+- SPIRE agents: N pods (where N = number of worker nodes), all 1/1 running
+- CSI driver: N pods (where N = number of worker nodes), all 2/2 running
+- CSI driver registered: `csi.spiffe.io` should be listed
+- ClusterSPIFFEID CRD: Should exist
+
+If any component is not running, check the pod logs:
+[source,sh]
+----
+# Example: Check SPIRE server logs
+oc logs -n openshift-zero-trust-workload-identity-manager <pod-name> -c spire-server
+----
+
+=== Deploy PostgreSQL Server with SPIFFE Integration
+
+==== Option A: Deploy via CLI
+
+[source,sh]
+----
+oc apply -f deploy/postgresql-spiffe.yaml
+----
+
+==== Option B: Deploy Manually via OpenShift Console
+
+1. Navigate to *Workloads* → *Deployments*
+2. Ensure you're in the *default* project or click *Create Project*
+   - Project name: `postgresql-spiffe`
+   - Click *Create*
+3. Click *Import YAML* (+ button in top right)
+4. Paste the contents from `deploy/postgresql-spiffe.yaml`
+5. Click *Create*
+6. The following resources will be created:
+   - Namespace: `postgresql-spiffe`
+   - ServiceAccount: `postgresql-spiffe`
+   - ClusterSPIFFEID: `postgresql-spiffe` (defines server certificate)
+   - ConfigMaps: `postgres-config`, `postgresql-init-db`, `spiffe-helper`
+   - Service: `postgresql-spiffe`
+   - Deployment: `postgresql-spiffe`
+
+===== Grant Required Permissions
+
+The PostgreSQL deployment requires `anyuid` SCC to run as the postgres user (UID 26):
+
+[source,sh]
+----
+# Label namespace for privileged pod security
+oc label namespace postgresql-spiffe \
+  security.openshift.io/scc.podSecurityLabelSync=false \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  --overwrite
+
+# Grant anyuid SCC to ServiceAccount
+oc adm policy add-scc-to-user anyuid -z postgresql-spiffe -n postgresql-spiffe
+----
+
+This deployment creates:
 [source,sh]
 ----
 oc apply -f https://raw.githubusercontent.com/SeanRickerd/postgresql-spiffe-demo/refs/heads/main/deploy/postgresql-spiffe.yaml
 ----
 
-This creates:
+- *Namespace*: `postgresql-spiffe`
+- *ServiceAccount*: `postgresql-spiffe` (used by SPIRE for identity)
+- *Deployment*: PostgreSQL server with spiffe-helper sidecar containers
+- *Service*: Exposes PostgreSQL on port 5432
+- *ClusterSPIFFEID*: Configures automatic certificate issuance with:
+  * Server certificate CN: `postgresql-spiffe.postgresql-spiffe.svc`
+  * SPIFFE ID: `spiffe://<trust-domain>/ns/postgresql-spiffe/sa/postgresql-spiffe`
+  * DNS SAN: `postgresql-spiffe.postgresql-spiffe.svc`
 
-- Namespace: `postgresql-spiffe`
-- Deployment: PostgreSQL server with spiffe-helper sidecar
-- Service: Exposed on port 5432
-- ClusterSPIFFEID: Configures server certificate with CN=`postgresql-spiffe.postgresql-spiffe.svc`
+The deployment includes three containers:
 
-=== Deploy PostgreSQL client with SPIFFE integration
+1. *spiffe-helper-init* (init container): Fetches initial certificates before PostgreSQL starts
+2. *postgresql-spiffe* (main): PostgreSQL database server configured for SSL with SPIFFE certs
+3. *spiffe-helper* (sidecar): Continuously rotates certificates and reloads PostgreSQL
+
+=== Deploy PostgreSQL Client with SPIFFE Integration
+
+==== Option A: Deploy via CLI
+
 [source,sh]
 ----
-oc apply -f https://raw.githubusercontent.com/SeanRickerd/postgresql-spiffe-demo/refs/heads/main/deploy/postgresql-spiffe-client.yaml
+oc apply -f deploy/postgresql-spiffe-client.yaml
 ----
 
-This creates:
+==== Option B: Deploy Manually via OpenShift Console
 
-- Namespace: `postgresql-spiffe-client`
-- Deployment: Client pod with spiffe-helper sidecar and psql tools
-- ClusterSPIFFEID: Configures client certificate with CN=`postgresql_spiffe` (database username)
+1. Navigate to *Workloads* → *Deployments*
+2. Click *Create Project* (if not already in a project)
+   - Project name: `postgresql-spiffe-client`
+   - Click *Create*
+3. Click *Import YAML* (+ button in top right)
+4. Paste the contents from `deploy/postgresql-spiffe-client.yaml`
+5. Click *Create*
 
-=== Wait for pods to be ready
+===== Grant Required Permissions
+
+The client deployment also requires `anyuid` SCC:
+
 [source,sh]
 ----
+# Label namespace for privileged pod security
+oc label namespace postgresql-spiffe-client \
+  security.openshift.io/scc.podSecurityLabelSync=false \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  --overwrite
+
+# Grant anyuid SCC to ServiceAccount
+oc adm policy add-scc-to-user anyuid -z postgresql-spiffe-client -n postgresql-spiffe-client
+----
+
+This deployment creates:
+
+- *Namespace*: `postgresql-spiffe-client`
+- *ServiceAccount*: `postgresql-spiffe-client`
+- *Deployment*: Client pod with psql tools and spiffe-helper sidecar
+- *ClusterSPIFFEID*: Configures client certificate with:
+  * Client certificate CN: `postgresql_spiffe` (matches database username)
+  * SPIFFE ID: `spiffe://<trust-domain>/ns/postgresql-spiffe-client/sa/postgresql-spiffe-client`
+  * DNS SAN: `postgresql_spiffe`
+
+[NOTE]
+====
+The client certificate's Common Name (CN) must match a valid PostgreSQL database user. PostgreSQL maps the CN directly to the username during certificate authentication. In this lab, the CN is `postgresql_spiffe`, which matches the database user created by the initialization script.
+====
+
+=== Wait for Pods to be Ready
+
+Before proceeding, ensure both the server and client pods are fully running:
+
+[source,sh]
+----
+# Wait for PostgreSQL server
 oc wait --for=condition=Ready pod -l app=postgresql-spiffe -n postgresql-spiffe --timeout=120s
+
+# Wait for PostgreSQL client
 oc wait --for=condition=Ready pod -l app=postgresql-spiffe-client -n postgresql-spiffe-client --timeout=120s
 ----
 
-=== Inspect server certificate properties
+Alternatively, check pod status via the Console:
+
+1. Navigate to *Workloads* → *Pods*
+2. Select the `postgresql-spiffe` project
+3. Verify the `postgresql-spiffe-*` pod shows "2/2 Running"
+4. Switch to the `postgresql-spiffe-client` project
+5. Verify the `postgresql-spiffe-client-*` pod shows "2/2 Running"
+
+[TIP]
+====
+If pods are not starting, check the events:
+[source,sh]
+----
+oc get events -n postgresql-spiffe --sort-by='.lastTimestamp'
+----
+
+Common issues:
+- *ImagePullBackOff*: Check image registry access
+- *CrashLoopBackOff*: Check pod logs with `oc logs -n postgresql-spiffe <pod-name> -c <container-name>`
+- *CreateContainerConfigError*: Verify SPIRE CSI driver is running
+====
+
+=== Inspect Server Certificate Properties
+
+SPIFFE certificates are automatically generated and mounted at `/opt/postgresql-certs/` by the spiffe-helper sidecar. Let's examine the server's certificate:
+
 [source,sh]
 ----
 oc rsh -n postgresql-spiffe -c postgresql-spiffe deployment/postgresql-spiffe \
   cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -text
 ----
 
-What to look for:
+==== Key Certificate Fields to Examine
 
-- Subject: CN should match server hostname: `postgresql-spiffe.postgresql-spiffe.svc`
-- Issuer: Should reference SPIRE authority
-- Validity: Short lifespan (typically minutes to hours, not days/months)
-- Subject Alternative Name (SAN): Should include SPIFFE ID URI
-
-Example:
+*Subject (Certificate Identity)*::
+The Common Name (CN) field identifies the server. For PostgreSQL, this should match the server's hostname:
++
 [source,text]
 ----
-Subject: CN=postgresql-spiffe.postgresql-spiffe.svc
-Issuer: O=SPIRE, C=US
-Validity:
-    Not Before: Apr 20 14:23:45 2026 GMT
-    Not After : Apr 20 15:23:55 2026 GMT  ← 1-hour validity
-X509v3 Subject Alternative Name:
-    URI:spiffe://cluster.local/ns/postgresql-spiffe/sa/postgresql-spiffe
+Subject: C=US, O=SPIRE, CN=postgresql-spiffe.postgresql-spiffe.svc
 ----
 
-=== Inspect client certificate properties
+*Issuer (Certificate Authority)*::
+Shows the SPIRE server that issued this certificate:
++
+[source,text]
+----
+Issuer: C=US, O=Red Hat, CN=redhat.com
+----
+
+*Validity Period (Short-Lived)*::
+SPIFFE certificates have intentionally short lifespans (default: 1 hour). This limits the exposure window if a certificate is compromised:
++
+[source,text]
+----
+Validity:
+    Not Before: Apr 22 12:32:55 2026 GMT
+    Not After : Apr 22 13:32:55 2026 GMT  ← 1-hour validity
+----
++
+Compare this to traditional certificates that are valid for months or years. Short-lived certificates eliminate the need for certificate revocation lists (CRLs).
+
+*Subject Alternative Name (SAN)*::
+Contains the SPIFFE ID URI, which uniquely identifies this workload:
++
+[source,text]
+----
+X509v3 Subject Alternative Name:
+    DNS:postgresql-spiffe.postgresql-spiffe.svc
+    URI:spiffe://apps.cluster-rp8v4.dynamic.redhatworkshops.io/ns/postgresql-spiffe/sa/postgresql-spiffe
+----
++
+The SPIFFE ID format: `spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>`
++
+This cryptographically binds the certificate to the Kubernetes workload identity (namespace + service account).
+
+*Public Key Algorithm*::
+Modern elliptic curve cryptography provides strong security with smaller key sizes:
++
+[source,text]
+----
+Public Key Algorithm: id-ecPublicKey
+    Public-Key: (256 bit)
+----
+
+==== View Certificate Files
+
+The spiffe-helper maintains three files:
+
+[source,sh]
+----
+oc rsh -n postgresql-spiffe -c postgresql-spiffe deployment/postgresql-spiffe \
+  ls -la /opt/postgresql-certs/
+----
+
+Expected output:
+[source,text]
+----
+-rw-------. 1 postgres postgres  241 Apr 22 12:32 svid.key         ← Private key (600 permissions)
+-rw-r--r--. 1 postgres postgres 1298 Apr 22 12:32 svid.pem         ← Public certificate
+-rw-r--r--. 1 postgres postgres 1403 Apr 22 12:32 svid_bundle.pem  ← CA bundle for verification
+----
+
+Key observations:
+
+- *Private key* (`svid.key`): Restricted to owner-only read (600). Never shared across the network.
+- *Public certificate* (`svid.pem`): World-readable, sent to clients during TLS handshake
+- *CA bundle* (`svid_bundle.pem`): Root and intermediate certificates for verifying other SPIFFE certificates
+
+=== Inspect Client Certificate Properties
+
+The client receives a separate SPIFFE identity. Examine the client certificate:
+
 [source,sh]
 ----
 oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
   cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -text
 ----
 
-What to look for:
+==== Client Certificate Key Fields
 
-- Subject: CN should match PostgreSQL username: `postgresql_spiffe`
-- Validity: Short-lived (same rotation policy as server)
-- SPIFFE ID: Unique identity for client workload
+*Subject (Client Identity)*::
+The CN must match a valid PostgreSQL database user:
++
+[source,text]
+----
+Subject: C=US, O=SPIRE, CN=postgresql_spiffe
+----
++
+PostgreSQL's `clientcert` authentication mode extracts the CN and maps it directly to a database username. The database initialization script created a user called `postgresql_spiffe`, so this certificate will authenticate as that user.
 
-This CN value (`postgresql_spiffe`) must match a valid PostgreSQL user. The server validates the client certificate and maps the CN to the database username.
+*SPIFFE ID (Client Workload Identity)*::
+[source,text]
+----
+X509v3 Subject Alternative Name:
+    DNS:postgresql_spiffe
+    URI:spiffe://apps.cluster-rp8v4.dynamic.redhatworkshops.io/ns/postgresql-spiffe-client/sa/postgresql-spiffe-client
+----
++
+Note the SPIFFE ID differs from the server:
++
+- *Server*: `spiffe://.../ns/postgresql-spiffe/sa/postgresql-spiffe`
+- *Client*: `spiffe://.../ns/postgresql-spiffe-client/sa/postgresql-spiffe-client`
++
+Each workload gets a unique SPIFFE ID based on its Kubernetes identity (namespace + service account).
 
-=== Establish mTLS connection from client
+*Same Trust Domain*::
+Both certificates share the same trust domain (e.g., `apps.cluster-rp8v4.dynamic.redhatworkshops.io`), allowing mutual verification using the shared CA bundle.
+
+==== Verify Certificate Lifecycle
+
+Check the certificate expiration timestamp:
+
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  sh -c 'echo "Current time: $(date)"; openssl x509 -in /opt/postgresql-certs/svid.pem -noout -dates'
+----
+
+Example output:
+[source,text]
+----
+Current time: Tue Apr 22 12:45:30 UTC 2026
+notBefore=Apr 22 12:32:54 2026 GMT
+notAfter=Apr 22 13:32:54 2026 GMT
+----
+
+The certificate is valid for approximately 1 hour. The spiffe-helper sidecar will automatically fetch a new certificate ~30 minutes before expiration, ensuring zero-downtime rotation.
+
+=== Establish mTLS Connection from Client
+
+Now we'll connect to PostgreSQL using mutual TLS authentication with SPIFFE certificates.
+
+==== Connect via One-Line Command
+
+You can test the connection directly without entering the pod:
+
+[source,sh]
+----
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=verify-full sslcert=/opt/postgresql-certs/svid.pem sslkey=/opt/postgresql-certs/svid.key sslrootcert=/opt/postgresql-certs/svid_bundle.pem" \
+  -c "SELECT current_user, current_database();"
+----
+
+Expected output:
+[source,text]
+----
+   current_user    | current_database
+-------------------+------------------
+ postgresql_spiffe | testdb
+(1 row)
+----
+
+Success! The connection authenticated using certificates with no password.
+
+==== Interactive Session (Detailed Walkthrough)
+
+For a more thorough exploration, open an interactive shell:
+
 [source,sh]
 ----
 oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client
 ----
 
-Inside the pod:
+Inside the pod, connect to PostgreSQL:
+
 [source,sh]
 ----
 psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=verify-full sslcert=/opt/postgresql-certs/svid.pem sslkey=/opt/postgresql-certs/svid.key sslrootcert=/opt/postgresql-certs/svid_bundle.pem"
 ----
 
-What to look for:
+==== Understanding the Connection String Parameters
 
-- Connection succeeds without password prompt
-- `sslmode=verify-full` enforces both server certificate verification and hostname validation
-- Three certificate components required:
-  * `sslcert`: Client's public certificate
-  * `sslkey`: Client's private key
-  * `sslrootcert`: CA bundle to verify server certificate
+Let's break down each connection parameter:
 
-=== Verify certificate-based authentication
-Inside the psql session:
+*host=postgresql-spiffe.postgresql-spiffe.svc*::
+Kubernetes service DNS name. Resolves to the PostgreSQL server pod.
+
+*port=5432*::
+Standard PostgreSQL port.
+
+*user=postgresql_spiffe*::
+Database username. Must match the certificate's Common Name (CN).
+
+*dbname=testdb*::
+Database created by the initialization script.
+
+*sslmode=verify-full*::
+Strictest SSL mode. Enforces:
++
+- Server must present a valid certificate
+- Certificate must be signed by a trusted CA (our SPIFFE CA bundle)
+- Certificate hostname must match the connection hostname
+- Client must present a certificate
++
+Other SSL modes (less secure):
++
+- `require`: Encrypts but doesn't verify server certificate
+- `verify-ca`: Verifies certificate but not hostname
+- `prefer`: Uses SSL if available, but falls back to unencrypted
+
+*sslcert=/opt/postgresql-certs/svid.pem*::
+Path to client's public certificate (X.509 certificate with SPIFFE ID).
+
+*sslkey=/opt/postgresql-certs/svid.key*::
+Path to client's private key. Never transmitted; used for TLS handshake proof-of-possession.
+
+*sslrootcert=/opt/postgresql-certs/svid_bundle.pem*::
+CA bundle to verify the server's certificate. Contains SPIRE root and intermediate certificates.
+
+=== Verify Certificate-Based Authentication
+
+Inside the `psql` session, examine the connection details:
+
 [source,sql]
 ----
+-- Show connection information
 \conninfo
+
+-- Display SSL connection details
+SELECT ssl_is_used();
+
+-- Show database version
 SELECT version();
+
+-- Exit
 \q
 ----
 
 Example output:
 [source,text]
 ----
-You are connected to database "testdb" as user "postgresql_spiffe" on host "postgresql-spiffe.postgresql-spiffe.svc" at port "5432".
-SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)
+testdb=> \conninfo
+You are connected to database "testdb" as user "postgresql_spiffe"
+on host "postgresql-spiffe.postgresql-spiffe.svc" at port "5432".
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384,
+bits: 256, compression: off)
 ----
 
-Critical evidence:
+==== Critical Security Evidence
 
-- User matches certificate CN: `postgresql_spiffe`
-- SSL connection active with TLS 1.3
-- No password was transmitted
+Analyze what just happened:
 
-=== Attempt connection without valid certificate (expect failure)
+1. *No Password Prompt*: The connection succeeded without any password. Authentication used only the client certificate.
+
+2. *User Matches Certificate CN*: The database user `postgresql_spiffe` matches the certificate's Common Name exactly.
+
+3. *TLS 1.3 Encryption*: Latest TLS protocol with forward secrecy.
+
+4. *Strong Cipher Suite*: `TLS_AES_256_GCM_SHA384` provides authenticated encryption.
+
+5. *Mutual Authentication*:
+   - Client verified server's certificate (hostname + CA signature)
+   - Server verified client's certificate (CN + CA signature)
+
+6. *No Stored Credentials*: No passwords in ConfigMaps, Secrets, or environment variables.
+
+==== Test Database Operations
+
+Verify the connection works for actual database operations:
+
 [source,sh]
 ----
-oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=verify-full sslcert=/opt/postgresql-certs/svid.pem sslkey=/opt/postgresql-certs/svid.key sslrootcert=/opt/postgresql-certs/svid_bundle.pem" <<'SQL'
+-- Insert test data
+INSERT INTO test_table (name, text)
+VALUES ('spiffe-test', 'Authenticated with certificates!');
+
+-- Query data
+SELECT * FROM test_table;
+SQL
 ----
 
-Inside the pod:
+Expected output:
+[source,text]
+----
+INSERT 0 1
+ id |     name     |            text
+----+-------------+-----------------------------
+  1 | spiffe-test | Authenticated with certificates!
+(1 row)
+----
+
+=== Test Security Controls: Connection Without Certificate (Should Fail)
+
+To prove certificate-based authentication is enforced, attempt connection without providing client certificates:
+
 [source,sh]
 ----
-psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=require" || true
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=require" \
+  2>&1 | head -5
 ----
-
-This should fail because:
-
-- No client certificate provided
-- PostgreSQL is configured to require certificate authentication
-- Password authentication is disabled for this user
 
 Expected error:
 [source,text]
 ----
-psql: error: connection to server at "postgresql-spiffe.postgresql-spiffe.svc", port 5432 failed: FATAL:  no pg_hba.conf entry for host "10.x.x.x", user "postgresql_spiffe", database "testdb", no encryption
+psql: error: connection to server at "postgresql-spiffe.postgresql-spiffe.svc"
+(172.231.5.121), port 5432 failed: FATAL: connection requires a valid client certificate
+connection to server at "postgresql-spiffe.postgresql-spiffe.svc"
+(172.231.5.121), port 5432 failed: FATAL: pg_hba.conf rejects connection for
+host "10.x.x.x", user "postgresql_spiffe", database "testdb", no encryption
 ----
 
-=== Verify automatic certificate rotation (optional)
+==== Why This Fails
+
+The connection fails for multiple security reasons:
+
+1. *No Client Certificate Provided*
++
+We used `sslmode=require` (encryption only) instead of `sslmode=verify-full` (encryption + certificates). No certificate was sent to the server.
+
+2. *PostgreSQL Requires Certificates*
++
+The `pg_hba.conf` configuration contains:
++
+[source,text]
+----
+hostssl   all   all   0.0.0.0/0   cert
+----
++
+This rule requires SSL *and* valid client certificate. No password authentication fallback.
+
+3. *No Password Configured*
++
+Even if password auth were allowed, the `postgresql_spiffe` user has no password set. Certificate is the *only* authentication method.
+
+==== What This Proves
+
+- *Zero-Trust Enforcement*: Network connectivity alone is insufficient. Workload must present valid SPIFFE certificate.
+- *No Password Bypass*: Cannot authenticate with stolen/guessed passwords because no passwords exist.
+- *Defense-in-Depth*: Multiple layers enforcing cryptographic identity (TLS layer + database layer).
+
+==== Test From Unauthorized Pod (Advanced)
+
+For additional verification, try connecting from a pod that *doesn't* have SPIFFE certificates:
+
+[source,sh]
+----
+# Create a test pod without SPIFFE integration
+oc run unauthorized-client --image=registry.redhat.io/rhel9/postgresql-16:latest \
+  -n postgresql-spiffe-client --command -- sleep infinity
+
+# Wait for pod to start
+oc wait --for=condition=Ready pod/unauthorized-client -n postgresql-spiffe-client --timeout=60s
+
+# Attempt connection (will fail)
+oc exec -n postgresql-spiffe-client unauthorized-client -- \
+  psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb" \
+  2>&1 | head -3
+
+# Cleanup
+oc delete pod unauthorized-client -n postgresql-spiffe-client
+----
+
+This demonstrates that even pods *within the same namespace* cannot connect without valid SPIFFE certificates. Namespace boundaries alone provide no access - only cryptographic proof of identity grants access.
+
+=== Observe Automatic Certificate Rotation (Optional)
+
+SPIFFE certificates automatically rotate before expiration with zero downtime. Let's observe this process.
+
+==== Capture Initial Certificate
+
+Record the current certificate's serial number and expiration:
+
 [source,sh]
 ----
 oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
-  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -enddate
+  sh -c 'openssl x509 -in /opt/postgresql-certs/svid.pem -noout -serial -enddate'
 ----
 
-Note the expiration time, then check again after the certificate rotation window:
+Example output:
+[source,text]
+----
+serial=1A2B3C4D5E6F7890
+notAfter=Apr 22 13:32:54 2026 GMT
+----
+
+==== Monitor spiffe-helper Logs
+
+The spiffe-helper sidecar logs certificate rotation events:
+
 [source,sh]
 ----
-sleep 3600  # Wait 1 hour (adjust based on your rotation policy)
+oc logs -n postgresql-spiffe-client -l app=postgresql-spiffe-client -c spiffe-helper --tail=20 -f
+----
+
+You'll see entries like:
+[source,text]
+----
+time="2026-04-22T13:02:54Z" level=info msg="Received update" spiffe_id="spiffe://..." system=spiffe-helper
+time="2026-04-22T13:02:54Z" level=info msg="X.509 certificates updated" system=spiffe-helper
+----
+
+The helper fetches new certificates approximately 30 minutes before expiration (configurable).
+
+==== Verify New Certificate After Rotation
+
+After observing a rotation event in the logs, check the certificate again:
+
+[source,sh]
+----
 oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
-  cat /opt/postgresql-certs/svid.pem | openssl x509 -noout -enddate
+  sh -c 'openssl x509 -in /opt/postgresql-certs/svid.pem -noout -serial -enddate'
 ----
 
-The certificate should have a new expiration time, proving automatic rotation occurred without application downtime.
+The serial number will be different, and the expiration time will be extended:
+[source,text]
+----
+serial=9F8E7D6C5B4A3210  ← New serial number
+notAfter=Apr 22 14:32:54 2026 GMT  ← New expiration (1 hour from rotation)
+----
 
-=== Cleanup (optional)
+==== Test Connection After Rotation
+
+Verify database connections continue working with the new certificate:
+
 [source,sh]
 ----
-oc delete project postgresql-spiffe postgresql-spiffe-client --wait=false
+oc rsh -n postgresql-spiffe-client -c postgresql-spiffe-client deployment/postgresql-spiffe-client \
+  psql "host=postgresql-spiffe.postgresql-spiffe.svc port=5432 user=postgresql_spiffe dbname=testdb sslmode=verify-full sslcert=/opt/postgresql-certs/svid.pem sslkey=/opt/postgresql-certs/svid.key sslrootcert=/opt/postgresql-certs/svid_bundle.pem" \
+  -c "SELECT 'Connection successful after rotation' AS status;"
 ----
+
+Expected output:
+[source,text]
+----
+             status
+-----------------------------------
+ Connection successful after rotation
+(1 row)
+----
+
+==== Key Observations
+
+- *Zero Downtime*: Database connections continue during rotation
+- *Automatic Process*: No manual intervention required
+- *Short Validity Windows*: Each certificate is only valid for ~1 hour
+- *Continuous Renewal*: New certificates fetched before old ones expire
+- *No Certificate Revocation Lists (CRLs) Needed*: Short TTL makes revocation unnecessary
+
+=== Cleanup
+
+When you're done with the lab, remove all resources:
+
+==== Option A: Quick Cleanup (Delete Projects)
+
+[source,sh]
+----
+# Delete PostgreSQL deployments (removes namespaces and all resources)
+oc delete project postgresql-spiffe postgresql-spiffe-client
+----
+
+This removes:
+- Both namespaces
+- All pods, services, deployments
+- ConfigMaps and ServiceAccounts
+- ClusterSPIFFEID resources (namespace-scoped despite the "Cluster" prefix)
+
+==== Option B: Selective Cleanup (Keep ZTWIM)
+
+If you want to keep ZTWIM installed for other labs:
+
+[source,sh]
+----
+# Delete only the PostgreSQL resources
+oc delete -f deploy/postgresql-spiffe-client.yaml
+oc delete -f deploy/postgresql-spiffe.yaml
+----
+
+==== Option C: Complete Cleanup (Remove ZTWIM)
+
+To remove everything including the ZTWIM operator:
+
+[source,sh]
+----
+# Delete PostgreSQL deployments
+oc delete -f deploy/postgresql-spiffe-client.yaml
+oc delete -f deploy/postgresql-spiffe.yaml
+
+# Delete SPIRE custom resources
+oc delete spireoidcdiscoveryprovider cluster
+oc delete spiffecsidriver cluster
+oc delete spireagent cluster
+oc delete spireserver cluster
+oc delete zerotrustworkloadidentitymanager cluster
+
+# Uninstall ZTWIM operator (via Console)
+# 1. Navigate to Operators → Installed Operators
+# 2. Select "openshift-zero-trust-workload-identity-manager" project
+# 3. Click "Zero Trust Workload Identity Manager" operator
+# 4. Click Actions → Uninstall Operator
+# 5. Confirm uninstallation
+# 6. Wait for operator removal
+# 7. Delete the namespace:
+oc delete project openshift-zero-trust-workload-identity-manager
+----
+
+[WARNING]
+====
+Removing ZTWIM will impact all workloads relying on SPIFFE certificates. Only perform complete cleanup if you're certain no other applications are using ZTWIM.
+====
+
+=== Troubleshooting
+
+==== Pods Not Starting
+
+*Symptom*: Pods stuck in `Pending`, `ImagePullBackOff`, or `CreateContainerConfigError`
+
+*Check*:
+[source,sh]
+----
+# View pod status
+oc get pods -n postgresql-spiffe
+
+# Check events
+oc get events -n postgresql-spiffe --sort-by='.lastTimestamp' | tail -20
+
+# Describe pod for detailed error
+oc describe pod -n postgresql-spiffe <pod-name>
+----
+
+*Common Causes*:
+- *ImagePullBackOff*: Image registry unreachable or requires authentication
+- *CreateContainerConfigError*: CSI driver not running or volume mount failed
+- *CrashLoopBackOff*: Container starting but failing - check logs
+
+==== CSI Volume Mount Failures
+
+*Symptom*: Error like "unable to attach or mount volumes"
+
+*Check*:
+[source,sh]
+----
+# Verify CSI driver is running
+oc get pods -n openshift-zero-trust-workload-identity-manager -l app.kubernetes.io/name=spire-spiffe-csi-driver
+
+# Verify CSI driver registration
+oc get csidriver csi.spiffe.io
+
+# Check SPIRE agents are running
+oc get pods -n openshift-zero-trust-workload-identity-manager -l app.kubernetes.io/name=spire-agent
+----
+
+*Solution*:
+- Ensure SPIRE agents running on all nodes (one pod per node)
+- Verify CSI driver DaemonSet healthy
+- Check CSI driver logs: `oc logs -n openshift-zero-trust-workload-identity-manager <csi-driver-pod> -c spiffe-csi-driver`
+
+==== Certificate Not Generated
+
+*Symptom*: Directory `/opt/postgresql-certs/` empty or missing files
+
+*Check*:
+[source,sh]
+----
+# Check if ClusterSPIFFEID exists
+oc get clusterspiffeid -A
+
+# Check spiffe-helper init container logs
+oc logs -n postgresql-spiffe <pod-name> -c spiffe-helper-init
+
+# Check spiffe-helper sidecar logs
+oc logs -n postgresql-spiffe <pod-name> -c spiffe-helper
+----
+
+*Common Causes*:
+- ClusterSPIFFEID resource not created or misconfigured
+- SPIRE agent cannot communicate with SPIRE server
+- Workload attestation failed (namespace/SA selectors don't match)
+
+==== Connection Failures
+
+*Symptom*: `psql` command times out or shows connection refused
+
+*Check*:
+[source,sh]
+----
+# Verify PostgreSQL service exists
+oc get svc -n postgresql-spiffe
+
+# Check PostgreSQL pod is running
+oc get pods -n postgresql-spiffe -l app=postgresql-spiffe
+
+# Check PostgreSQL logs
+oc logs -n postgresql-spiffe <pod-name> -c postgresql-spiffe
+
+# Test network connectivity
+oc rsh -n postgresql-spiffe-client <client-pod> -c postgresql-spiffe-client \
+  curl -v telnet://postgresql-spiffe.postgresql-spiffe.svc:5432
+----
+
+*Common Causes*:
+- PostgreSQL pod not running or not ready
+- Service selector doesn't match pod labels
+- Network policies blocking traffic (if NetworkPolicies are configured)
+
+==== SSL/Certificate Errors
+
+*Symptom*: "SSL connection has been closed unexpectedly" or "certificate verify failed"
+
+*Check*:
+[source,sh]
+----
+# Verify certificates exist
+oc rsh -n postgresql-spiffe-client <client-pod> -c postgresql-spiffe-client \
+  ls -la /opt/postgresql-certs/
+
+# Check certificate validity
+oc rsh -n postgresql-spiffe-client <client-pod> -c postgresql-spiffe-client \
+  openssl x509 -in /opt/postgresql-certs/svid.pem -noout -dates
+
+# Verify certificate CN
+oc rsh -n postgresql-spiffe-client <client-pod> -c postgresql-spiffe-client \
+  openssl x509 -in /opt/postgresql-certs/svid.pem -noout -subject
+----
+
+*Common Causes*:
+- Certificate expired (check notAfter date vs current time)
+- Certificate CN doesn't match database username
+- Certificate not signed by trusted CA (trust domain mismatch)
+- Wrong sslmode in connection string
+
+==== Permission Denied Errors
+
+*Symptom*: "permission denied" when accessing certificate files
+
+*Check*:
+[source,sh]
+----
+# Check file permissions
+oc rsh -n postgresql-spiffe <pod-name> -c postgresql-spiffe \
+  ls -la /opt/postgresql-certs/
+
+# Check container user
+oc rsh -n postgresql-spiffe <pod-name> -c postgresql-spiffe id
+----
+
+*Solution*:
+- Ensure `anyuid` SCC is granted to ServiceAccount
+- Verify `runAsUser: 26` and `fsGroup: 26` in pod securityContext
+- Check spiffe-helper is running as UID 26 (postgres user)
 
 == Summary Table
 [cols="1,2,2,2",options="header"]

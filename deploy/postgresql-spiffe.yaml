@@ -140,9 +140,8 @@ spec:
       schedulerName: default-scheduler
       terminationGracePeriodSeconds: 30
       securityContext:
-        runAsNonRoot: true
-        seccompProfile:
-          type: RuntimeDefault
+        runAsUser: 26
+        fsGroup: 26
       initContainers:
         - name: spiffe-helper-init
           image: 'quay.io/ablock/spiffe-helper-postgresql:latest'
@@ -221,6 +220,7 @@ spec:
           terminationMessagePolicy: File
           imagePullPolicy: Always
           securityContext:
+            runAsUser: 26
             capabilities:
               drop:
                 - ALL
